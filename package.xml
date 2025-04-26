@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>class_agnostic_object_detector_ros</name>
+  <version>0.1.0</version>
+  <description>ROS 2 wrapper for mvits_for_class_agnostic_od</description>
+  <maintainer email="mitukou1109@gmail.com">Mitsuhiro Sakamoto</maintainer>
+  <license>BSD</license>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
