@@ -45,13 +45,13 @@ class ObjectDetector(rclpy.node.Node):
 
         self.detections_pub = self.create_publisher(
             vision_msgs.msg.Detection2DArray,
-            "detections",
+            "~/detections",
             1,
         )
 
         self.result_image_pub = self.create_publisher(
             sensor_msgs.msg.Image,
-            "result_image",
+            "~/result_image",
             1,
         )
 
