@@ -11,6 +11,7 @@ import numpy.typing as npt
 import rclpy
 import rclpy.node
 import sensor_msgs.msg
+import std_msgs.msg
 import vision_msgs.msg
 
 
@@ -33,6 +34,11 @@ class ObjectDetector(rclpy.node.Node):
             .get_parameter_value()
             .double_value
         )
+        self.use_compressed_image = (
+            self.declare_parameter("use_compressed_image", True)
+            .get_parameter_value()
+            .bool_value
+        )
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
@@ -54,30 +60,58 @@ class ObjectDetector(rclpy.node.Node):
             "~/result_image",
             1,
         )
-
-        self.image_raw_sub = self.create_subscription(
-            sensor_msgs.msg.Image,
-            "image_raw",
-            self.image_raw_callback,
+        self.result_image_compressed_pub = self.create_publisher(
+            sensor_msgs.msg.CompressedImage,
+            "~/result_image/compressed",
             1,
         )
 
-    def image_raw_callback(self, msg: sensor_msgs.msg.Image):
-        image: npt.NDArray[np.uint8] = self.cv_bridge.imgmsg_to_cv2(
+        if self.use_compressed_image:
+            self.image_raw_sub = self.create_subscription(
+                sensor_msgs.msg.CompressedImage,
+                "image_raw/compressed",
+                self.image_raw_compressed_callback,
+                1,
+            )
+        else:
+            self.image_raw_sub = self.create_subscription(
+                sensor_msgs.msg.Image,
+                "image_raw",
+                self.image_raw_callback,
+                1,
+            )
+
+    def image_raw_compressed_callback(self, msg: sensor_msgs.msg.CompressedImage):
+        raw_image: npt.NDArray[np.uint8] = self.cv_bridge.compressed_imgmsg_to_cv2(
             msg, desired_encoding="rgb8"
         )
 
-        success, jpg_image = cv2.imencode(".jpg", image)
+        self.detect_objects(msg.data, raw_image, msg.header)
+
+    def image_raw_callback(self, msg: sensor_msgs.msg.Image):
+        raw_image: npt.NDArray[np.uint8] = self.cv_bridge.imgmsg_to_cv2(
+            msg, desired_encoding="rgb8"
+        )
+
+        success, jpg_image = cv2.imencode(".jpg", raw_image)
         if not success:
             return
 
+        self.detect_objects(jpg_image, raw_image, msg.header)
+
+    def detect_objects(
+        self,
+        encoded_image,
+        raw_image: npt.NDArray[np.uint8],
+        header: std_msgs.msg.Header,
+    ):
         result: tuple[list[list[int]], list[np.float32]] = self.model.infer_image(
-            io.BytesIO(jpg_image), caption=self.text_query
+            io.BytesIO(encoded_image), caption=self.text_query
         )
 
         detections_msg = vision_msgs.msg.Detection2DArray()
-        detections_msg.header = msg.header
-        result_image = image.copy()
+        detections_msg.header = header
+        result_image = raw_image.copy()
 
         for box, score in zip(*result):
             if score < self.score_threshold:
@@ -88,7 +122,7 @@ class ObjectDetector(rclpy.node.Node):
             x1, y1, x2, y2 = map(float, box)
 
             detection = vision_msgs.msg.Detection2D()
-            detection.header = msg.header
+            detection.header = header
             detection.bbox.size_x = x2 - x1
             detection.bbox.size_y = y2 - y1
             detection.bbox.center.position.x = (x1 + x2) / 2
@@ -114,9 +148,15 @@ class ObjectDetector(rclpy.node.Node):
         self.detections_pub.publish(detections_msg)
 
         result_image_msg = self.cv_bridge.cv2_to_imgmsg(
-            result_image, encoding="rgb8", header=msg.header
+            result_image, encoding="rgb8", header=header
         )
         self.result_image_pub.publish(result_image_msg)
+
+        result_image_compressed_msg = self.cv_bridge.cv2_to_compressed_imgmsg(
+            result_image
+        )
+        result_image_compressed_msg.header = header
+        self.result_image_compressed_pub.publish(result_image_compressed_msg)
 
     def draw_result_on_image(
         self,
