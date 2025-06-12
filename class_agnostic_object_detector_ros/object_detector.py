@@ -1,4 +1,6 @@
+import copy
 import io
+import threading
 import warnings
 
 import cv2
@@ -9,6 +11,7 @@ import mvits_for_class_agnostic_od.models.model as mvits_model
 import numpy as np
 import numpy.typing as npt
 import rclpy
+import rclpy.callback_groups
 import rclpy.node
 import sensor_msgs.msg
 import std_msgs.msg
@@ -16,6 +19,17 @@ import vision_msgs.msg
 
 
 class ObjectDetector(rclpy.node.Node):
+    class Result:
+        def __init__(
+            self,
+            boxes: list[list[int]],
+            scores: list[np.float32],
+            image: npt.NDArray[np.uint8],
+        ):
+            self.boxes = boxes
+            self.scores = scores
+            self.image = image
+
     def __init__(self):
         super().__init__("class_agnostic_object_detector")
 
@@ -39,6 +53,11 @@ class ObjectDetector(rclpy.node.Node):
             .get_parameter_value()
             .bool_value
         )
+        result_visualization_rate = (
+            self.declare_parameter("result_visualization_rate", 10.0)
+            .get_parameter_value()
+            .double_value
+        )
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
@@ -49,20 +68,12 @@ class ObjectDetector(rclpy.node.Node):
 
         self.cv_bridge = cv_bridge.CvBridge()
 
+        self.result_lock = threading.Lock()
+        self.result: ObjectDetector.Result = None
+
         self.detections_pub = self.create_publisher(
             vision_msgs.msg.Detection2DArray,
             "~/detections",
-            1,
-        )
-
-        self.result_image_pub = self.create_publisher(
-            sensor_msgs.msg.Image,
-            "~/result_image",
-            1,
-        )
-        self.result_image_compressed_pub = self.create_publisher(
-            sensor_msgs.msg.CompressedImage,
-            "~/result_image/compressed",
             1,
         )
 
@@ -80,6 +91,12 @@ class ObjectDetector(rclpy.node.Node):
                 self.image_raw_callback,
                 1,
             )
+
+        self.visualize_result_timer = self.create_timer(
+            1.0 / result_visualization_rate,
+            self.visualize_result_callback,
+            rclpy.callback_groups.MutuallyExclusiveCallbackGroup(),
+        )
 
     def image_raw_compressed_callback(self, msg: sensor_msgs.msg.CompressedImage):
         raw_image: npt.NDArray[np.uint8] = self.cv_bridge.compressed_imgmsg_to_cv2(
@@ -99,6 +116,25 @@ class ObjectDetector(rclpy.node.Node):
 
         self.detect_objects(jpg_image, raw_image, msg.header)
 
+    def visualize_result_callback(self):
+        if self.result is None:
+            return
+
+        with self.result_lock:
+            result = copy.deepcopy(self.result)
+
+        for box, score in zip(result.boxes, result.scores):
+            self.draw_result_on_image(result.image, box, score)
+
+        resize_ratio = 640 / max(result.image.shape[0], result.image.shape[1])
+        result_image = cv2.cvtColor(
+            cv2.resize(result.image, dsize=None, fx=resize_ratio, fy=resize_ratio),
+            cv2.COLOR_RGB2BGR,
+        )
+
+        cv2.imshow("Object detector", result_image)
+        cv2.waitKey(1)
+
     def detect_objects(
         self,
         encoded_image,
@@ -111,13 +147,16 @@ class ObjectDetector(rclpy.node.Node):
 
         detections_msg = vision_msgs.msg.Detection2DArray()
         detections_msg.header = header
-        result_image = raw_image.copy()
+
+        boxes: list[list[int]] = []
+        scores: list[np.float32] = []
 
         for box, score in zip(*result):
             if score < self.score_threshold:
                 continue
 
-            self.draw_result_on_image(result_image, box, score)
+            boxes.append(box)
+            scores.append(score)
 
             x1, y1, x2, y2 = map(float, box)
 
@@ -147,16 +186,8 @@ class ObjectDetector(rclpy.node.Node):
 
         self.detections_pub.publish(detections_msg)
 
-        result_image_msg = self.cv_bridge.cv2_to_imgmsg(
-            result_image, encoding="rgb8", header=header
-        )
-        self.result_image_pub.publish(result_image_msg)
-
-        result_image_compressed_msg = self.cv_bridge.cv2_to_compressed_imgmsg(
-            result_image
-        )
-        result_image_compressed_msg.header = header
-        self.result_image_compressed_pub.publish(result_image_compressed_msg)
+        with self.result_lock:
+            self.result = ObjectDetector.Result(boxes, scores, raw_image)
 
     def draw_result_on_image(
         self,
